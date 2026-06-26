@@ -1,0 +1,88 @@
+{
+  "name": "brave-search-companion",
+  "title": "Brave Search Companion",
+  "description": "A private, local-first companion for Brave Search with AI answers, completion suggestions, web results, and searchable history.",
+  "icon": "icon.png",
+  "author": "roPio",
+  "platforms": [
+    "macOS"
+  ],
+  "categories": [
+    "Productivity"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1Pio/raycast-brave-search-companion.git"
+  },
+  "bugs": {
+    "url": "https://github.com/1Pio/raycast-brave-search-companion/issues"
+  },
+  "homepage": "https://github.com/1Pio/raycast-brave-search-companion#readme",
+  "keywords": [
+    "brave",
+    "search",
+    "ai",
+    "history",
+    "web"
+  ],
+  "commands": [
+    {
+      "name": "search-brave",
+      "title": "Search Brave",
+      "description": "Search Brave with AI answers, suggestions, web results, and local history.",
+      "mode": "view",
+      "keywords": [
+        "brave",
+        "web",
+        "ai",
+        "ask",
+        "search"
+      ]
+    },
+    {
+      "name": "search-history",
+      "title": "Search History",
+      "description": "Fuzzily search local Brave Search Companion history.",
+      "mode": "view",
+      "keywords": [
+        "brave",
+        "history",
+        "previous",
+        "search"
+      ]
+    },
+    {
+      "name": "search-settings",
+      "title": "Search Settings",
+      "description": "Configure history retention and completion suggestions for Brave Search Companion.",
+      "mode": "view",
+      "keywords": [
+        "brave",
+        "settings",
+        "privacy",
+        "retention"
+      ]
+    }
+  ],
+  "scripts": {
+    "build": "ray build -e dist",
+    "dev": "ray develop",
+    "lint": "ray lint",
+    "publish": "ray publish",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@raycast/api": "^1.104.20"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^2.1.1",
+    "@types/node": "^24.0.3",
+    "@types/react": "^19.1.8",
+    "eslint": "^9.29.0",
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}
