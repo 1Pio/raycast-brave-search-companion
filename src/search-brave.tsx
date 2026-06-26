@@ -1,4 +1,4 @@
-import { Action, ActionPanel, Icon, List, showToast, Toast } from "@raycast/api";
+import { Action, ActionPanel, Detail, Icon, List, showToast, Toast } from "@raycast/api";
 import { type Dispatch, type SetStateAction, useEffect, useMemo, useState } from "react";
 import { useDebouncedValue } from "./hooks/use-debounced-value";
 import { fetchAIAnswer, fetchSearchPage, fetchSuggestions } from "./lib/brave";
@@ -60,6 +60,7 @@ export default function Command() {
   const [state, setState] = useState<SearchState>(emptyState);
   const [settings, setSettings] = useState<SearchSettings>(DEFAULT_SETTINGS);
   const debouncedQuery = useDebouncedValue(searchText, SEARCH_DEBOUNCE_MS);
+  const hasSearchText = compactWhitespace(searchText).length > 0;
 
   useEffect(() => {
     getSettings()
@@ -89,19 +90,23 @@ export default function Command() {
   return (
     <List
       filtering={false}
-      isLoading={state.isLoading}
-      isShowingDetail
+      isLoading={hasSearchText && state.isLoading}
+      isShowingDetail={hasSearchText}
       navigationTitle="Search Brave"
       onSearchTextChange={setSearchText}
       searchBarPlaceholder="Search Brave..."
       searchText={searchText}
       throttle={false}
     >
-      <List.Section title="AI response">
-        <AIResponseItem state={state} allResultsContent={allResultsContent} />
-      </List.Section>
+      {!hasSearchText ? (
+        <List.EmptyView icon={Icon.MagnifyingGlass} title="Type a query to search Brave" />
+      ) : (
+        <List.Section title="AI response">
+          <AIResponseItem state={state} allResultsContent={allResultsContent} />
+        </List.Section>
+      )}
 
-      {settings.completionSuggestionCount > 0 && state.suggestions.length > 0 ? (
+      {hasSearchText && settings.completionSuggestionCount > 0 && state.suggestions.length > 0 ? (
         <List.Section title="Completion suggestions">
           {state.suggestions.map((suggestion) => (
             <List.Item
@@ -130,7 +135,7 @@ export default function Command() {
         </List.Section>
       ) : null}
 
-      {state.results.length > 0 ? (
+      {hasSearchText && state.results.length > 0 ? (
         <List.Section title="Top web results">
           {state.results.map((result) => (
             <WebResultItem
@@ -376,6 +381,7 @@ export async function runSearch(
 function AIResponseItem({ state, allResultsContent }: { state: SearchState; allResultsContent: string }) {
   const title = getAIItemTitle(state);
   const answer = state.ai.answer;
+  const detailText = getAIPlainText(state);
   const query = state.query;
   const conversationId = state.ai.conversationId;
 
@@ -388,17 +394,18 @@ function AIResponseItem({ state, allResultsContent }: { state: SearchState; allR
       detail={
         <List.Item.Detail
           isLoading={state.ai.status === "loading"}
-          markdown={markdownForAIAnswer(answer)}
+          markdown={markdownForAIAnswer(detailText)}
           metadata={<AIResponseMetadata ai={state.ai} query={query} results={state.results} />}
         />
       }
       actions={
         <ActionPanel>
-          <Action.CopyToClipboard
-            title="Copy AI Answer"
-            icon={Icon.Clipboard}
-            content={answer || "No AI answer is available for this query."}
+          <Action.Push
+            title="Open Plain Text AI Answer"
+            icon={Icon.Text}
+            target={<PlainTextAIAnswerDetail text={detailText} />}
           />
+          <Action.CopyToClipboard title="Copy AI Answer" icon={Icon.Clipboard} content={answer} />
           <PasteAIAnswerAction answer={answer} />
           <SearchOpenActions query={query} conversationId={conversationId} />
           {state.results.length > 0 ? (
@@ -466,22 +473,37 @@ function WebResultItem({
 }
 
 function AIAnswerActions({ answer }: { answer: string }) {
-  const content = answer || "No AI answer is available for this query.";
+  if (!answer) {
+    return null;
+  }
 
   return (
     <ActionPanel.Section>
-      <Action.CopyToClipboard title="Copy AI Answer" icon={Icon.Clipboard} content={content} />
+      <Action.CopyToClipboard title="Copy AI Answer" icon={Icon.Clipboard} content={answer} />
       <PasteAIAnswerAction answer={answer} />
     </ActionPanel.Section>
   );
 }
 
 function PasteAIAnswerAction({ answer }: { answer: string }) {
+  if (!answer) {
+    return null;
+  }
+
+  return <Action.Paste title="Paste AI Answer" icon={Icon.TextCursor} content={answer} />;
+}
+
+function PlainTextAIAnswerDetail({ text }: { text: string }) {
   return (
-    <Action.Paste
-      title="Paste AI Answer"
-      icon={Icon.TextCursor}
-      content={answer || "No AI answer is available for this query."}
+    <Detail
+      navigationTitle="Plain Text AI Answer"
+      markdown={markdownForPlainText(text)}
+      actions={
+        <ActionPanel>
+          <Action.CopyToClipboard title="Copy AI Answer" icon={Icon.Clipboard} content={text} />
+          <Action.Paste title="Paste AI Answer" icon={Icon.TextCursor} content={text} />
+        </ActionPanel>
+      }
     />
   );
 }
@@ -555,18 +577,85 @@ function DeleteSearchAction({ query }: { query: string }) {
 
 function getAIItemTitle(state: SearchState): string {
   if (!state.query) {
-    return "Type a query to search Brave";
+    return "Waiting for query";
   }
   if (state.ai.status === "loading") {
-    return "Loading Brave AI answer...";
+    return "Loading AI answer";
   }
   if (state.ai.status === "error") {
-    return "AI answer unavailable";
+    return getAIErrorTitle(state.ai.error);
+  }
+  if (state.ai.status === "unavailable") {
+    return "No AI answer available";
   }
   if (!state.ai.answer) {
-    return "No AI answer returned";
+    return "Waiting for AI answer";
   }
   return truncate(state.ai.answer.replace(/\n/g, " "), 80);
+}
+
+function getAIPlainText(state: SearchState): string {
+  if (state.ai.answer) {
+    return state.ai.answer;
+  }
+  if (!state.query) {
+    return "Waiting for query.";
+  }
+  if (state.ai.status === "loading") {
+    return "Loading AI answer.";
+  }
+  if (state.ai.status === "idle") {
+    return "Waiting for search.";
+  }
+  if (state.ai.status === "unavailable") {
+    return "No AI answer is available for this query.";
+  }
+  if (state.ai.status === "error") {
+    return getAIErrorDescription(state.ai.error);
+  }
+  return "Waiting for AI answer.";
+}
+
+function getAIErrorTitle(error?: string): string {
+  if (!error) {
+    return "AI request failed";
+  }
+  if (error.includes("429") || error.toLowerCase().includes("rate limited")) {
+    return "AI request rate limited";
+  }
+  if (error.includes("browser verification")) {
+    return "Browser verification required";
+  }
+  if (error.includes("no parseable results")) {
+    return "Search response unreadable";
+  }
+  if (error.includes("Search request failed")) {
+    return "Search request failed";
+  }
+  return "AI request failed";
+}
+
+function getAIErrorDescription(error?: string): string {
+  if (!error) {
+    return "AI request failed.";
+  }
+  if (error.includes("429") || error.toLowerCase().includes("rate limited")) {
+    return "Brave rate limited this request. Try again in a moment.";
+  }
+  if (error.includes("browser verification")) {
+    return "Brave requested browser verification before streaming AI answers.";
+  }
+  if (error.includes("no parseable results")) {
+    return "Could not read the Brave search response for this query.";
+  }
+  if (error.includes("Search request failed")) {
+    return "Brave Search request failed. Try again in a moment.";
+  }
+  return error;
+}
+
+function markdownForPlainText(value: string): string {
+  return `\`\`\`text\n${value.replace(/```/g, "`\\`\\`")}\n\`\`\``;
 }
 
 function resultToSource(result: BraveWebResult): BraveSource {

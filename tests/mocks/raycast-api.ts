@@ -26,6 +26,7 @@ export const Action = Object.assign(RaycastComponent, {
   CopyToClipboard: RaycastComponent,
   OpenInBrowser: RaycastComponent,
   Paste: RaycastComponent,
+  Push: RaycastComponent,
   Style: {
     Destructive: "destructive",
   },
@@ -42,6 +43,7 @@ const Metadata = Object.assign(RaycastComponent, {
 });
 
 export const List = Object.assign(RaycastComponent, {
+  EmptyView: RaycastComponent,
   Item: Object.assign(RaycastComponent, {
     Detail: Object.assign(RaycastComponent, {
       Metadata,
@@ -49,6 +51,8 @@ export const List = Object.assign(RaycastComponent, {
   }),
   Section: RaycastComponent,
 });
+
+export const Detail = RaycastComponent;
 
 export const Form = Object.assign(RaycastComponent, {
   Dropdown: Object.assign(RaycastComponent, {

@@ -9,7 +9,7 @@ export function formatResultsForClipboard(results: BraveWebResult[]): string {
 }
 
 export function markdownForAIAnswer(answer: string): string {
-  return answer.trim() || "No AI answer is available for this query.";
+  return answer.trim();
 }
 
 export function markdownForResultPreview(result: BraveWebResult): string {
