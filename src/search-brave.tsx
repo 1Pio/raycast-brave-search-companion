@@ -1,5 +1,5 @@
 import { Action, ActionPanel, Icon, List, showToast, Toast } from "@raycast/api";
-import { useEffect, useMemo, useState } from "react";
+import { type Dispatch, type SetStateAction, useEffect, useMemo, useState } from "react";
 import { useDebouncedValue } from "./hooks/use-debounced-value";
 import { fetchAIAnswer, fetchSearchPage, fetchSuggestions } from "./lib/brave";
 import {
@@ -9,8 +9,8 @@ import {
   markdownForResultPreview,
 } from "./lib/format";
 import { compactWhitespace, truncate } from "./lib/text";
-import { prepareCompletionSuggestions } from "./lib/suggestions";
-import { BraveAIAnswer, BraveSource, BraveWebResult, SearchSettings } from "./lib/types";
+import { limitCompletionSuggestions, prepareCompletionSuggestions } from "./lib/suggestions";
+import { BraveAIAnswer, BraveSearchEntry, BraveSource, BraveWebResult, SearchSettings } from "./lib/types";
 import { buildAskUrl, buildSearchUrl } from "./lib/urls";
 import {
   DEFAULT_SETTINGS,
@@ -23,7 +23,7 @@ import {
 
 const SEARCH_DEBOUNCE_MS = 500;
 
-interface SearchState {
+export interface SearchState {
   query: string;
   isLoading: boolean;
   suggestions: string[];
@@ -34,6 +34,11 @@ interface SearchState {
 interface SearchPageResult {
   conversationId?: string;
   results: BraveWebResult[];
+}
+
+interface ResolvedSearchPageResult extends SearchPageResult {
+  isLive: boolean;
+  error?: unknown;
 }
 
 const emptyAI: BraveAIAnswer = {
@@ -143,22 +148,34 @@ export default function Command() {
   );
 }
 
-async function runSearch(
+export async function runSearch(
   query: string,
   settings: SearchSettings,
   signal: AbortSignal,
-  setState: React.Dispatch<React.SetStateAction<SearchState>>,
+  setState: Dispatch<SetStateAction<SearchState>>,
 ): Promise<void> {
-  setState({
-    query,
-    isLoading: true,
-    suggestions: [],
-    results: [],
-    ai: {
-      ...emptyAI,
-      status: "loading",
-    },
-  });
+  setState((previous) =>
+    previous.query === query
+      ? {
+          ...previous,
+          isLoading: true,
+          ai: {
+            ...previous.ai,
+            error: undefined,
+            status: previous.ai.answer ? previous.ai.status : "loading",
+          },
+        }
+      : {
+          query,
+          isLoading: true,
+          suggestions: [],
+          results: [],
+          ai: {
+            ...emptyAI,
+            status: "loading",
+          },
+        },
+  );
 
   const cachedEntryPromise = getHistoryEntryForQuery(query).catch(() => undefined);
   cachedEntryPromise.then((cachedEntry) => {
@@ -173,7 +190,7 @@ async function runSearch(
             suggestions:
               previous.suggestions.length > 0
                 ? previous.suggestions
-                : prepareCompletionSuggestions(cachedEntry.suggestions, settings.completionSuggestionCount),
+                : cachedSuggestionsForDisplay(cachedEntry, settings),
             results: previous.results.length > 0 ? previous.results : cachedEntry.results,
             ai: cachedEntry.aiAnswer
               ? {
@@ -188,9 +205,17 @@ async function runSearch(
     );
   });
 
-  const suggestionsPromise = fetchSuggestions(query, signal)
-    .then((suggestions) => prepareCompletionSuggestions(suggestions, settings.completionSuggestionCount))
-    .catch(() => []);
+  const suggestionsPromise =
+    settings.completionSuggestionCount === 0
+      ? Promise.resolve([])
+      : fetchSuggestions(query, signal)
+          .then((suggestions) =>
+            prepareCompletionSuggestions(suggestions, settings.completionSuggestionCount),
+          )
+          .catch(async () => {
+            const cachedEntry = await cachedEntryPromise;
+            return cachedEntry ? cachedSuggestionsForDisplay(cachedEntry, settings) : [];
+          });
   suggestionsPromise.then((suggestions) => {
     if (!signal.aborted) {
       setState((previous) => (previous.query === query ? { ...previous, suggestions } : previous));
@@ -198,7 +223,17 @@ async function runSearch(
   });
 
   const searchPagePromise = fetchSearchPage(query, signal)
-    .then((searchPage) => {
+    .then(async (searchPage): Promise<ResolvedSearchPageResult> => {
+      if (!hasSearchContext(searchPage)) {
+        const cachedEntry = await cachedEntryPromise;
+        return {
+          conversationId: cachedEntry?.conversationId,
+          results: cachedEntry?.results ?? [],
+          isLive: false,
+          error: new Error("Brave Search returned no parseable results."),
+        };
+      }
+
       if (!signal.aborted) {
         const fallbackSources = searchPage.results.map(resultToSource);
         setState((previous) =>
@@ -216,19 +251,41 @@ async function runSearch(
         );
       }
 
-      return searchPage;
+      return { ...searchPage, isLive: true };
     })
-    .catch(async (): Promise<SearchPageResult> => {
+    .catch(async (error: unknown): Promise<ResolvedSearchPageResult> => {
       const cachedEntry = await cachedEntryPromise;
       return {
         conversationId: cachedEntry?.conversationId,
         results: cachedEntry?.results ?? [],
+        isLive: false,
+        error,
       };
     });
 
   const aiPromise = searchPagePromise
     .then(async (searchPage): Promise<BraveAIAnswer> => {
       const fallbackSources = searchPage.results.map(resultToSource);
+      if (!searchPage.isLive) {
+        const cachedEntry = await cachedEntryPromise;
+        if (cachedEntry?.aiAnswer) {
+          return {
+            answer: cachedEntry.aiAnswer,
+            conversationId: cachedEntry.conversationId ?? searchPage.conversationId,
+            sources: cachedEntry.aiSources.length > 0 ? cachedEntry.aiSources : fallbackSources,
+            status: "ready",
+          };
+        }
+
+        return {
+          answer: "",
+          conversationId: searchPage.conversationId,
+          sources: fallbackSources,
+          status: "error",
+          error: errorMessage(searchPage.error, "Brave Search request failed."),
+        };
+      }
+
       const ai = await fetchAIAnswer(query, searchPage.conversationId, fallbackSources, signal);
 
       if (ai.status === "error" || (!ai.answer && ai.status !== "loading" && ai.status !== "idle")) {
@@ -264,7 +321,7 @@ async function runSearch(
         answer: "",
         sources: [],
         status: "error",
-        error: error instanceof Error ? error.message : "AI answer request failed.",
+        error: errorMessage(error, "AI answer request failed."),
       };
     });
 
@@ -299,14 +356,21 @@ async function runSearch(
       : previous,
   );
 
-  await saveSearchEntry({
-    query,
-    conversationId: finalAI.conversationId,
-    aiAnswer: finalAI.answer,
-    aiSources: finalAI.sources,
-    suggestions,
-    results: searchPage.results,
-  });
+  if (
+    finalAI.answer ||
+    finalAI.sources.length > 0 ||
+    suggestions.length > 0 ||
+    searchPage.results.length > 0
+  ) {
+    await saveSearchEntry({
+      query,
+      conversationId: finalAI.conversationId,
+      aiAnswer: finalAI.answer,
+      aiSources: finalAI.sources,
+      suggestions,
+      results: searchPage.results,
+    });
+  }
 }
 
 function AIResponseItem({ state, allResultsContent }: { state: SearchState; allResultsContent: string }) {
@@ -435,13 +499,6 @@ function AIResponseMetadata({
 
   return (
     <List.Item.Detail.Metadata>
-      {query ? <List.Item.Detail.Metadata.Label title="Query" text={query} /> : null}
-      <List.Item.Detail.Metadata.Label
-        title="Notice"
-        text="AI-generated answer. Please verify critical facts."
-      />
-      {ai.error ? <List.Item.Detail.Metadata.Label title="AI status" text={ai.error} /> : null}
-      {sources.length > 0 ? <List.Item.Detail.Metadata.Separator /> : null}
       {sources.map((source, index) => (
         <List.Item.Detail.Metadata.Link
           key={`${source.url}:${index}`}
@@ -450,6 +507,13 @@ function AIResponseMetadata({
           target={source.url}
         />
       ))}
+      {sources.length > 0 && (query || ai.error) ? <List.Item.Detail.Metadata.Separator /> : null}
+      {query ? <List.Item.Detail.Metadata.Label title="Query" text={query} /> : null}
+      {ai.error ? <List.Item.Detail.Metadata.Label title="AI Status" text={ai.error} /> : null}
+      <List.Item.Detail.Metadata.Label
+        title="Notice"
+        text="AI-generated answer. Please verify critical facts."
+      />
     </List.Item.Detail.Metadata>
   );
 }
@@ -510,4 +574,16 @@ function resultToSource(result: BraveWebResult): BraveSource {
     title: result.title,
     url: result.url,
   };
+}
+
+function hasSearchContext(searchPage: SearchPageResult): boolean {
+  return searchPage.results.length > 0 || Boolean(searchPage.conversationId);
+}
+
+function cachedSuggestionsForDisplay(cachedEntry: BraveSearchEntry, settings: SearchSettings): string[] {
+  return limitCompletionSuggestions(cachedEntry.suggestions, settings.completionSuggestionCount);
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
 }

@@ -11,8 +11,14 @@ import {
 import { BraveAIAnswer, BraveSource, BraveWebResult } from "./types";
 
 const FETCH_TIMEOUT_MS = 30000;
+const TRANSIENT_FETCH_RETRIES = 1;
+const TRANSIENT_RETRY_DELAY_MS = 900;
+const MIN_BRAVE_REQUEST_GAP_MS = 180;
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
+
+let braveRequestQueue = Promise.resolve();
+let lastBraveRequestStartedAt = 0;
 
 const HTML_HEADERS = {
   accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -45,12 +51,13 @@ interface SearchPageResult {
 }
 
 export async function fetchSuggestions(query: string, signal?: AbortSignal): Promise<string[]> {
-  const response = await fetchWithTimeout(
+  const response = await fetchWithRetries(
     buildSuggestUrl(query),
     {
       headers: JSON_HEADERS,
     },
     signal,
+    TRANSIENT_FETCH_RETRIES,
   );
 
   if (!response.ok) {
@@ -61,12 +68,13 @@ export async function fetchSuggestions(query: string, signal?: AbortSignal): Pro
 }
 
 export async function fetchSearchPage(query: string, signal?: AbortSignal): Promise<SearchPageResult> {
-  const response = await fetchWithTimeout(
+  const response = await fetchWithRetries(
     buildSearchUrl(query),
     {
       headers: HTML_HEADERS,
     },
     signal,
+    TRANSIENT_FETCH_RETRIES,
   );
 
   if (!response.ok) {
@@ -273,8 +281,108 @@ function fetchWithTimeout(
   }
   parentSignal?.addEventListener("abort", abort, { once: true });
 
-  return fetch(input, { ...init, signal: controller.signal }).finally(() => {
-    clearTimeout(timeout);
-    parentSignal?.removeEventListener("abort", abort);
+  return waitForBraveRequestSlot(parentSignal)
+    .then(() => fetch(input, { ...init, signal: controller.signal }))
+    .finally(() => {
+      clearTimeout(timeout);
+      parentSignal?.removeEventListener("abort", abort);
+    });
+}
+
+async function fetchWithRetries(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  parentSignal: AbortSignal | undefined,
+  retries: number,
+): Promise<Response> {
+  let attempt = 0;
+
+  while (true) {
+    const response = await fetchWithTimeout(input, init, parentSignal);
+    if (attempt >= retries || !isTransientResponse(response)) {
+      return response;
+    }
+
+    void response.body?.cancel().catch(() => undefined);
+    await delay(readRetryAfter(response) ?? TRANSIENT_RETRY_DELAY_MS * (attempt + 1), parentSignal);
+    attempt += 1;
+  }
+}
+
+async function waitForBraveRequestSlot(signal?: AbortSignal): Promise<void> {
+  const turn = braveRequestQueue.then(async () => {
+    throwIfAborted(signal);
+    const waitMs = Math.max(0, MIN_BRAVE_REQUEST_GAP_MS - (Date.now() - lastBraveRequestStartedAt));
+    if (waitMs > 0) {
+      await delay(waitMs, signal);
+    }
+    throwIfAborted(signal);
+    lastBraveRequestStartedAt = Date.now();
   });
+
+  braveRequestQueue = turn.catch(() => {
+    return undefined;
+  });
+  await turn;
+}
+
+function isTransientResponse(response: Response): boolean {
+  return (
+    response.status === 408 ||
+    response.status === 409 ||
+    response.status === 425 ||
+    response.status === 429 ||
+    response.status >= 500
+  );
+}
+
+function readRetryAfter(response: Response): number | undefined {
+  const retryAfter = response.headers.get("retry-after");
+  if (!retryAfter) {
+    return undefined;
+  }
+
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, 5000);
+  }
+
+  const date = Date.parse(retryAfter);
+  if (!Number.isNaN(date)) {
+    return Math.min(Math.max(0, date - Date.now()), 5000);
+  }
+
+  return undefined;
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) {
+    return Promise.resolve();
+  }
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
+  }
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const abort = () => {
+      cleanup();
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+    };
+
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
 }

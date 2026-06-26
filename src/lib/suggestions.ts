@@ -15,9 +15,16 @@ export function prepareCompletionSuggestions(
   suggestions: string[],
   maxCount: CompletionSuggestionCount,
 ): string[] {
+  return limitCompletionSuggestions(suggestions.slice(1), maxCount);
+}
+
+export function limitCompletionSuggestions(
+  suggestions: string[],
+  maxCount: CompletionSuggestionCount,
+): string[] {
   if (maxCount === 0) {
     return [];
   }
 
-  return suggestions.slice(1).slice(0, maxCount);
+  return suggestions.slice(0, maxCount);
 }

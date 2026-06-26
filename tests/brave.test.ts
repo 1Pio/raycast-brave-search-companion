@@ -25,6 +25,17 @@ describe("Brave fetch layer", () => {
     );
   });
 
+  it("retries one transient completion suggestion throttle", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(["raycast", ["raycast", "raycast mac"]])));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchSuggestions("raycast")).resolves.toEqual(["raycast", "raycast mac"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("fetches and parses the Brave search page", async () => {
     const html = `
       web:{type:"search",results:[{title:"Raycast",url:"https://www.raycast.com/",meta_url:{netloc:"raycast.com"},thumbnail:{src:"https://example.com/preview.png"}}]},
