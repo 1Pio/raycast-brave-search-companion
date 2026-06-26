@@ -7,14 +7,19 @@ describe("Brave fetch layer", () => {
   });
 
   it("fetches completion suggestions from the free public suggestion endpoint", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(["raycast", ["raycast", "raycast mac"]])));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(["raycast", ["raycast", "raycast mac"]])));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(fetchSuggestions("raycast")).resolves.toEqual(["raycast", "raycast mac"]);
     expect(fetchMock).toHaveBeenCalledWith(
       "https://search.brave.com/api/suggest?q=raycast",
       expect.objectContaining({
-        headers: expect.objectContaining({ accept: "application/json" }),
+        headers: expect.objectContaining({
+          accept: "application/json",
+          "user-agent": expect.stringContaining("Mozilla/5.0"),
+        }),
         signal: expect.any(AbortSignal),
       }),
     );
@@ -33,7 +38,38 @@ describe("Brave fetch layer", () => {
     expect(parsed.results[0]).toMatchObject({ title: "Raycast", url: "https://www.raycast.com/" });
   });
 
-  it("fetches and parses the Brave TAP AI answer stream", async () => {
+  it("prefers the Brave search conversation stream when a conversation id is available", async () => {
+    const stream = [
+      '{"type":"text_delta","delta":"Use the search conversation."}',
+      '{"type":"initial_response","service_response":{"web":{"results":[{"title":"Raycast","url":"https://www.raycast.com/"}]}}}',
+    ].join("\n");
+    const fetchMock = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+      const value = String(url);
+      if (value.includes("/api/chatllm/with_ask?")) {
+        return new Response(stream);
+      }
+      throw new Error(`Unexpected URL: ${value}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchAIAnswer("raycast extension", "conversation-1", [])).resolves.toMatchObject({
+      answer: "Use the search conversation.",
+      conversationId: "conversation-1",
+      status: "ready",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "https://search.brave.com/api/chatllm/with_ask?conversation=conversation-1&enable_inline_entities=true",
+    );
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      headers: expect.objectContaining({
+        accept: "text/event-stream,application/json;q=0.9,*/*;q=0.8",
+        "user-agent": expect.stringContaining("Mozilla/5.0"),
+      }),
+    });
+  });
+
+  it("fetches and parses the Brave TAP AI answer stream when no conversation id is available", async () => {
     const askHtml = `
       searchLang:"en",country:"us",language:"en-us",safesearch:"moderate",forceSafesearch:false,units:"metric",useLocation:false,
       token:{q:"raycast extension",nonce:"nonce-1",sig:"sig-1"}
@@ -58,13 +94,18 @@ describe("Brave fetch layer", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(fetchAIAnswer("raycast extension", "legacy-conversation", [])).resolves.toMatchObject({
+    await expect(fetchAIAnswer("raycast extension", undefined, [])).resolves.toMatchObject({
       answer: "Brave Search works.",
       conversationId: "conversation-2",
       status: "ready",
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({ headers: { accept: "text/html" } });
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      headers: expect.objectContaining({
+        accept: expect.stringContaining("text/html"),
+        "user-agent": expect.stringContaining("Mozilla/5.0"),
+      }),
+    });
     expect(fetchMock.mock.calls[1][1]).toEqual(expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(fetchMock.mock.calls[1][1]).not.toHaveProperty("headers");
     expect(fetchMock.mock.calls[2][1]).toEqual(expect.objectContaining({ signal: expect.any(AbortSignal) }));
@@ -95,10 +136,9 @@ describe("Brave fetch layer", () => {
     );
 
     await expect(
-      fetchAIAnswer("raycast extension", "legacy-conversation", [{ title: "Fallback", url: "https://example.com/" }]),
+      fetchAIAnswer("raycast extension", undefined, [{ title: "Fallback", url: "https://example.com/" }]),
     ).resolves.toMatchObject({
       answer: "",
-      conversationId: "legacy-conversation",
       error: "Brave requested browser verification before streaming AI answers.",
       status: "error",
     });

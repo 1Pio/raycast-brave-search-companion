@@ -11,6 +11,33 @@ import {
 import { BraveAIAnswer, BraveSource, BraveWebResult } from "./types";
 
 const FETCH_TIMEOUT_MS = 30000;
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
+
+const HTML_HEADERS = {
+  accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  "accept-language": "en-US,en;q=0.9",
+  "cache-control": "no-cache",
+  pragma: "no-cache",
+  "sec-fetch-dest": "document",
+  "sec-fetch-mode": "navigate",
+  "sec-fetch-site": "none",
+  "sec-fetch-user": "?1",
+  "upgrade-insecure-requests": "1",
+  "user-agent": BROWSER_USER_AGENT,
+};
+
+const JSON_HEADERS = {
+  accept: "application/json",
+  "accept-language": "en-US,en;q=0.9",
+  "user-agent": BROWSER_USER_AGENT,
+};
+
+const STREAM_HEADERS = {
+  accept: "text/event-stream,application/json;q=0.9,*/*;q=0.8",
+  "accept-language": "en-US,en;q=0.9",
+  "user-agent": BROWSER_USER_AGENT,
+};
 
 interface SearchPageResult {
   conversationId?: string;
@@ -21,9 +48,7 @@ export async function fetchSuggestions(query: string, signal?: AbortSignal): Pro
   const response = await fetchWithTimeout(
     buildSuggestUrl(query),
     {
-      headers: {
-        accept: "application/json",
-      },
+      headers: JSON_HEADERS,
     },
     signal,
   );
@@ -39,10 +64,7 @@ export async function fetchSearchPage(query: string, signal?: AbortSignal): Prom
   const response = await fetchWithTimeout(
     buildSearchUrl(query),
     {
-      headers: {
-        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "accept-language": "en-US,en;q=0.9",
-      },
+      headers: HTML_HEADERS,
     },
     signal,
   );
@@ -60,19 +82,32 @@ export async function fetchAIAnswer(
   fallbackSources: BraveSource[],
   signal?: AbortSignal,
 ): Promise<BraveAIAnswer> {
+  if (conversationId) {
+    try {
+      return await fetchLegacyAIAnswer(conversationId, fallbackSources, signal);
+    } catch (legacyError) {
+      if (signal?.aborted) {
+        return { answer: "", sources: fallbackSources, status: "idle" };
+      }
+
+      const tapAnswer = await fetchTapAIAnswer(query, fallbackSources, signal).catch(() => undefined);
+      if (tapAnswer) {
+        return {
+          ...tapAnswer,
+          conversationId: tapAnswer.conversationId ?? conversationId,
+          sources: tapAnswer.sources.length > 0 ? tapAnswer.sources : fallbackSources,
+        };
+      }
+
+      return failedAIAnswer(legacyError, fallbackSources, conversationId);
+    }
+  }
+
   try {
     return await fetchTapAIAnswer(query, fallbackSources, signal);
   } catch (error) {
     if (signal?.aborted) {
       return { answer: "", sources: fallbackSources, status: "idle" };
-    }
-
-    if (conversationId) {
-      try {
-        return await fetchLegacyAIAnswer(conversationId, fallbackSources, signal);
-      } catch {
-        return failedAIAnswer(error, fallbackSources, conversationId);
-      }
     }
 
     return failedAIAnswer(error, fallbackSources);
@@ -87,9 +122,7 @@ async function fetchTapAIAnswer(
   const askPageResponse = await fetchWithTimeout(
     buildAskUrl(query),
     {
-      headers: {
-        accept: "text/html",
-      },
+      headers: HTML_HEADERS,
     },
     signal,
   );
@@ -156,10 +189,7 @@ async function fetchLegacyAIAnswer(
   const response = await fetchWithTimeout(
     buildAIStreamUrl(conversationId),
     {
-      headers: {
-        accept: "text/event-stream,application/json;q=0.9,*/*;q=0.8",
-        "accept-language": "en-US,en;q=0.9",
-      },
+      headers: STREAM_HEADERS,
     },
     signal,
   );

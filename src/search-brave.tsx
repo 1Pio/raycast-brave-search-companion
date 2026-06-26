@@ -226,8 +226,26 @@ async function runSearch(
       };
     });
 
-  const aiPromise = fetchAIAnswer(query, undefined, [], signal).catch(
-    async (error: unknown): Promise<BraveAIAnswer> => {
+  const aiPromise = searchPagePromise
+    .then(async (searchPage): Promise<BraveAIAnswer> => {
+      const fallbackSources = searchPage.results.map(resultToSource);
+      const ai = await fetchAIAnswer(query, searchPage.conversationId, fallbackSources, signal);
+
+      if (ai.status === "error" || (!ai.answer && ai.status !== "loading" && ai.status !== "idle")) {
+        const cachedEntry = await cachedEntryPromise;
+        if (cachedEntry?.aiAnswer) {
+          return {
+            answer: cachedEntry.aiAnswer,
+            conversationId: cachedEntry.conversationId ?? ai.conversationId ?? searchPage.conversationId,
+            sources: cachedEntry.aiSources.length > 0 ? cachedEntry.aiSources : fallbackSources,
+            status: "ready",
+          };
+        }
+      }
+
+      return ai;
+    })
+    .catch(async (error: unknown): Promise<BraveAIAnswer> => {
       if (signal.aborted) {
         return { ...emptyAI, status: "idle" };
       }
@@ -248,8 +266,7 @@ async function runSearch(
         status: "error",
         error: error instanceof Error ? error.message : "AI answer request failed.",
       };
-    },
-  );
+    });
 
   aiPromise.then((ai) => {
     if (!signal.aborted) {
